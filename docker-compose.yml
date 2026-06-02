@@ -1,0 +1,67 @@
+services:
+  # --- Capa de Conectividad (API Gateway) ---
+  api-gateway:
+    image: nginx:alpine
+    container_name: api-gateway-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./api-gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - micro-tickets
+      - micro-laboratorio
+      - db-pacientes
+      - db-logs
+    networks:
+      - red-salud-local
+
+  # --- Microservicio Área 1: Tickets ---
+  micro-tickets:
+    build: ./micro-tickets
+    container_name: micro-tickets-servicio
+    environment:
+      - DB_HOST=db-pacientes
+      - DB_USER=user_salud
+      - DB_PASSWORD=password_seguro123
+      - DB_NAME=centro_medico
+    depends_on:
+      - db-pacientes
+    networks:
+      - red-salud-local
+
+  # --- Microservicio Área 2: Laboratorio IoT (Simulado Temporal) ---
+  micro-laboratorio:
+    image: node:18-alpine
+    container_name: micro-laboratorio-servicio
+    command: sh -c "node -e 'const http = require(\"http\"); http.createServer((req, res) => res.end(\"Servicio de Laboratorio e IoT Operativo\")).listen(4000);'"
+    networks:
+      - red-salud-local
+
+  # --- Capa de Datos Distribuidos (CON VOLUMEN PERSISTENTE) ---
+  db-pacientes:
+    image: postgres:15-alpine
+    container_name: postgres-pacientes-main
+    environment:
+      POSTGRES_USER: user_salud
+      POSTGRES_PASSWORD: password_seguro123
+      POSTGRES_DB: centro_medico
+    volumes:
+      - datos_postgres_medico:/var/lib/postgresql/data # <-- NUEVO: Mapea los datos internos a tu disco real
+    networks:
+      - red-salud-local
+
+  db-logs:
+    image: mongo:6.0
+    container_name: mongodb-logs
+    networks:
+      - red-salud-local
+
+# NUEVO: Declaramos el volumen permanente al final del archivo
+volumes:
+  datos_postgres_medico:
+    driver: local
+
+networks:
+  red-salud-local:
+    driver: bridge
+    
