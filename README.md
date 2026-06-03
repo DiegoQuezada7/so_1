@@ -49,5 +49,5 @@ docker compose up --build
 ```
 
 Posteriormente, en tu navegador selecciona la área de trabajo:
-Para el **Sistema de Tickets (Área 1)**: ```bash http://localhost/tickets/```
-Para la **Maquinaria IoT / Laboratorio (Área 2)**: ```bash http://localhost/laboratorio/```
+* Para el **Sistema de Tickets (Área 1)**: ```http://localhost/tickets/```
+* Para la **Maquinaria IoT / Laboratorio (Área 2)**: ```http://localhost/laboratorio/```
