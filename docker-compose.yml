@@ -24,8 +24,10 @@ services:
       - DB_USER=user_salud
       - DB_PASSWORD=password_seguro123
       - DB_NAME=centro_medico
+      - MONGO_URL=mongodb://db-logs:27017
     depends_on:
       - db-pacientes
+      - db-logs
     networks:
       - red-salud-local
 
