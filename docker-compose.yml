@@ -29,39 +29,91 @@ services:
     networks:
       - red-salud-local
 
-  # --- Microservicio Área 2: Laboratorio IoT (Simulado Temporal) ---
+  # --- Microservicio Área 2: Laboratorio IoT ---
   micro-laboratorio:
-    image: node:18-alpine
+    build: ./micro-laboratorio
     container_name: micro-laboratorio-servicio
-    command: sh -c "node -e 'const http = require(\"http\"); http.createServer((req, res) => res.end(\"Servicio de Laboratorio e IoT Operativo\")).listen(4000);'"
+    environment:
+      - MONGO_URL=mongodb://db-logs:27017
+    depends_on:
+      - db-logs
     networks:
       - red-salud-local
 
-  # --- Capa de Datos Distribuidos (CON VOLUMEN PERSISTENTE) ---
+  # --- Capa de Datos: PostgreSQL MAESTRO (Permisos de Replicación Automatizados) ---
   db-pacientes:
     image: postgres:15-alpine
     container_name: postgres-pacientes-main
     environment:
-      POSTGRES_USER: user_salud
-      POSTGRES_PASSWORD: password_seguro123
-      POSTGRES_DB: centro_medico
+      - POSTGRES_USER=user_salud
+      - POSTGRES_PASSWORD=password_seguro123
+      - POSTGRES_DB=centro_medico
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    # TRUCO: Inyectamos dinámicamente la regla de replicación en el HBA antes de iniciar
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mkdir -p /docker-entrypoint-initdb.d
+        echo "echo 'host replication all all trust' >> /var/lib/postgresql/data/pg_hba.conf" > /docker-entrypoint-initdb.d/setup-replication.sh
+        chmod +x /docker-entrypoint-initdb.d/setup-replication.sh
+        exec docker-entrypoint.sh postgres -c wal_level=replica -c max_wal_senders=10 -c max_replication_slots=10
     volumes:
-      - datos_postgres_medico:/var/lib/postgresql/data # <-- NUEVO: Mapea los datos internos a tu disco real
+      - datos_postgres_maestro:/var/lib/postgresql/data
     networks:
       - red-salud-local
 
+  # --- Capa de Datos: PostgreSQL RÉPLICA (Control de Errores Estricto) ---
+  db-pacientes-replica:
+    image: postgres:15-alpine
+    container_name: postgres-pacientes-replica
+    environment:
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    depends_on:
+      - db-pacientes
+    volumes:
+      - datos_postgres_replica:/var/lib/postgresql/data
+    networks:
+      - red-salud-local
+    entrypoint:
+      - sh
+      - -c
+      - |
+        until pg_isready -h db-pacientes -U user_salud -d centro_medico; do
+          echo '⏳ Esperando a que el maestro PostgreSQL esté listo y acepte visitas...'
+          sleep 2
+        done
+        if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+          echo '🔄 Directorio vacío. Iniciando clonación en espejo (pg_basebackup)...'
+          rm -rf /var/lib/postgresql/data/*
+          # Corregido: Si pg_basebackup falla, el contenedor se detiene explícitamente informando el error
+          if pg_basebackup -h db-pacientes -D /var/lib/postgresql/data -U user_salud -X stream -R; then
+            echo '✅ Sincronización binaria completada con éxito real.'
+          else
+            echo '❌ Error crítico: La clonación falló. Revisa los permisos del Maestro.'
+            exit 1
+          fi
+        fi
+        exec docker-entrypoint.sh postgres
+
+  # --- Capa de Datos NoSQL: MongoDB ---
   db-logs:
     image: mongo:6.0
     container_name: mongodb-logs
+    volumes:
+      - datos_mongo_auditoria:/data/db
     networks:
       - red-salud-local
 
-# NUEVO: Declaramos el volumen permanente al final del archivo
+# Declaración de volúmenes permanentes
 volumes:
-  datos_postgres_medico:
+  datos_postgres_maestro:
+    driver: local
+  datos_postgres_replica:
+    driver: local
+  datos_mongo_auditoria:
     driver: local
 
 networks:
   red-salud-local:
     driver: bridge
-    
