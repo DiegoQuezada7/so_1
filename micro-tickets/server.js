@@ -2,27 +2,45 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const { Pool } = require('pg');
-const { MongoClient } = require('mongodb'); // NUEVO: Cliente Mongo para auditoría
+const { MongoClient } = require('mongodb');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { path: '/socket.io' });
 
-// 1. Configuración del Pool PostgreSQL
+// 1. Configuración del Pool PostgreSQL Maestro
 const pool = new Pool({
     host: process.env.DB_HOST || 'db-pacientes',
     user: process.env.DB_USER || 'user_salud',
     password: process.env.DB_PASSWORD || 'password_seguro123',
     database: process.env.DB_NAME || 'centro_medico',
     port: 5432,
+    connectionTimeoutMillis: 2000 // Tiempo corto para saltar rápido a contingencia
 });
 
-// 2. Configuración Cliente MongoDB (Auditoría Centralizada)
+// 🔥 LA LÍNEA MÁGICA: Captura errores asíncronos del Pool y evita que Node.js muera en un 'docker stop'
+pool.on('error', (err) => {
+    console.log('⚠️ [PostgreSQL Pool] Conexión de fondo interrumpida (ej. Servidor Maestro apagado o reiniciándose). El proceso sigue vivo.');
+});
+
+// 2. Configuración MongoDB (Auditoría y Contingencia)
 const mongoUrl = process.env.MONGO_URL || 'mongodb://db-logs:27017';
 let mongoDb;
 
 const inicializarBasesDatos = async () => {
-    // Inicializar Postgres
+    let mongoConectado = false;
+    while (!mongoConectado) {
+        try {
+            const client = await MongoClient.connect(mongoUrl);
+            mongoDb = client.db('laboratorio_db');
+            console.log('✅ [MongoDB] Conectado para auditoría y contingencia.');
+            mongoConectado = true;
+        } catch (err) {
+            console.log('⏳ [MongoDB] Esperando inicialización... reintentando en 3s.');
+            await new Promise(res => setTimeout(res, 3000));
+        }
+    }
+
     let pgConectado = false;
     while (!pgConectado) {
         try {
@@ -33,121 +51,121 @@ const inicializarBasesDatos = async () => {
                     fecha_llamado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             `);
-            console.log('✅ [PostgreSQL] Conexión y tabla verificadas.');
+            console.log('✅ [PostgreSQL] Tabla historial_tickets verificada en Maestro.');
             pgConectado = true;
         } catch (err) {
-            console.log('⏳ [PostgreSQL] Esperando inicialización... reintentando en 3s.');
-            await new Promise(res => setTimeout(res, 3000));
-        }
-    }
-
-    // Inicializar Mongo
-    let mongoConectado = false;
-    while (!mongoConectado) {
-        try {
-            const client = await MongoClient.connect(mongoUrl);
-            mongoDb = client.db('laboratorio_db');
-            console.log('✅ [MongoDB] Conectado para auditoría de seguridad.');
-            mongoConectado = true;
-        } catch (err) {
-            console.log('⏳ [MongoDB] Esperando inicialización... reintentando en 3s.');
+            console.log('⏳ [PostgreSQL] Buscando conexión con Maestro... reintentando en 3s.');
             await new Promise(res => setTimeout(res, 3000));
         }
     }
 };
 inicializarBasesDatos();
 
-// Interfaz gráfica con control de Roles (RBAC Simulado)
+// WORKER AUTOMÁTICO: Sincronizador de Contingencia (Cada 5 segundos)
+setInterval(async () => {
+    if (!mongoDb) return;
+    try {
+        const colaContingencia = mongoDb.collection('cola_contingencia');
+        const ticketsPendientes = await colaContingencia.find({}).toArray();
+        
+        if (ticketsPendientes.length > 0) {
+            await pool.query('SELECT 1'); // Probar si Postgres despertó
+            
+            for (const ticketDoc of ticketsPendientes) {
+                await pool.query('INSERT INTO historial_tickets (ticket_codigo, fecha_llamado) VALUES ($1, $2)', 
+                    [ticketDoc.ticket_codigo, ticketDoc.fecha_llamado]);
+                await colaContingencia.deleteOne({ _id: ticketDoc._id });
+            }
+            console.log('✅ [Worker] Datos de contingencia vaciados en PostgreSQL Maestro.');
+            io.emit('contingencia-resuelta');
+        }
+    } catch (err) {
+        // El maestro sigue abajo, no hace nada y espera el próximo ciclo
+    }
+}, 5000);
+
 app.get('/', async (req, res) => {
     let historialHTML = '';
+    let estadoMaestro = 'ONLINE';
+    
     try {
         const result = await pool.query('SELECT ticket_codigo, fecha_llamado FROM historial_tickets ORDER BY id DESC LIMIT 5');
         historialHTML = result.rows.length === 0 
-            ? '<li>No hay registros.</li>' 
-            : result.rows.map(row => `<li><strong>${row.ticket_codigo}</strong> - ${new Date(row.fecha_llamado).toLocaleTimeString()}</li>`).join('');
+            ? '<li>No hay registros en la base de datos todavía.</li>' 
+            : result.rows.map(row => `<li><strong>${row.ticket_codigo}</strong> - Llamado a las: ${new Date(row.fecha_llamado).toLocaleTimeString()}</li>`).join('');
     } catch (err) {
-        historialHTML = '<li>Error al cargar Postgres.</li>';
+        if (err.code === '42P01') {
+            historialHTML = '<li>Estructurando tablas relacionales... Refresca en 2 segundos.</li>';
+        } else {
+            estadoMaestro = 'CONTINGENCIA (Maestro caído - Guardando en MongoDB)';
+            try {
+                const buffer = await mongoDb.collection('cola_contingencia').find({}).sort({_id: -1}).limit(5).toArray();
+                historialHTML = buffer.length === 0 
+                    ? '<li>Sin tickets nuevos en contingencia.</li>'
+                    : buffer.map(t => `<li><span style="color:orange">⚠️ [Buffer]</span> <strong>${t.ticket_codigo}</strong> - Llamado a las: ${new Date(t.fecha_llamado).toLocaleTimeString()}</li>`).join('');
+            } catch (mErr) {
+                historialHTML = '<li>Error total de persistencia.</li>';
+            }
+        }
     }
 
     res.send(`
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Sala de Espera - Seguridad RBAC</title>
+            <title>Sala de Espera - Sistema Sincronizado</title>
             <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
             <style>
                 body { font-family: sans-serif; text-align: center; background: #f4f6f9; padding: 40px; }
                 .card { background: white; padding: 30px; border-radius: 8px; display: inline-block; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 480px; }
-                .auth-box { background: #f8f9fa; border: 1px solid #ced4da; padding: 15px; border-radius: 6px; margin-bottom: 20px; text-align: left; }
+                .status-banner { padding: 10px; font-weight: bold; border-radius: 5px; margin-bottom: 20px; }
+                .online { background: #d4edda; color: #155724; }
+                .failover { background: #f8d7da; color: #721c24; animation: parpadeo 2s infinite; }
                 #pantalla { font-size: 48px; color: #e74c3c; font-weight: bold; margin: 20px 0; }
                 .history-box { margin-top: 25px; text-align: left; background: #ebf5fb; padding: 15px; border-radius: 6px; border-left: 5px solid #3498db; }
-                button { padding: 12px 20px; font-size: 15px; background: #2ecc71; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%; }
-                button:hover { background: #27ae60; }
-                select { padding: 8px; width: 100%; margin-top: 5px; font-size: 14px; }
-                .alerta-error { color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 10px; border-radius: 5px; margin-top: 15px; display: none; }
+                button { padding: 12px 20px; font-size: 15px; background: #3498db; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%; }
+                @keyframes parpadeo { 0% {opacity: 0.6;} 50% {opacity: 1;} 100% {opacity: 0.6;} }
             </style>
         </head>
         <body>
             <div class="card">
-                <h2>SISTEMA DE TICKETS CON SEGURIDAD (RBAC)</h2>
-                
-                <div class="auth-box">
-                    <strong>Capa de Autenticación (Simulación OAuth2):</strong><br>
-                    <label>Selecciona tu Rol de Intranet:</label>
-                    <select id="rol-select" onchange="actualizarToken()">
-                        <option value="Médico">Médico (Autorizado para área Tickets)</option>
-                        <option value="Laboratorista">Laboratorista (No Autorizado aquí)</option>
-                    </select>
-                </div>
-
+                <h2>SISTEMA DE TICKETS (Estable)</h2>
+                <div id="banner" class="status-banner ${estadoMaestro === 'ONLINE' ? 'online' : 'failover'}">ESTADO RED: ${estadoMaestro}</div>
                 <p>Último paciente llamado:</p>
                 <div id="pantalla">Esperando llamado...</div>
                 <button onclick="simularLlamado()">Médico: Llamar Siguiente Paciente</button>
-                
-                <div id="error-box" class="alerta-error"></div>
-
                 <div class="history-box">
-                    <h3>Persistencia Base de Datos (PostgreSQL):</h3>
+                    <h3>Persistencia Activa (Clúster Híbrido):</h3>
                     <ul id="lista-historial">${historialHTML}</ul>
                 </div>
             </div>
-
             <script>
                 const socket = io({ path: '/tickets/socket.io' });
                 let miTokenSimulado = { user: "diego@salud.cl", role: "Médico" };
 
-                function actualizarToken() {
-                    miTokenSimulado.role = document.getElementById('rol-select').value;
-                    document.getElementById('error-box').style.display = 'none';
-                }
-
                 socket.on('nuevo-paciente', (data) => {
                     document.getElementById('pantalla').innerText = data.ticket;
                     const lista = document.getElementById('lista-historial');
-                    if (lista.innerText.includes("No hay registros")) lista.innerHTML = "";
-                    
+                    if (lista.innerText.includes("No hay registros") || lista.innerText.includes("Sin tickets") || lista.innerText.includes("Estructurando")) lista.innerHTML = "";
                     const nuevoItem = document.createElement('li');
-                    nuevoItem.innerHTML = "<strong>" + data.ticket + "</strong> - " + new Date().toLocaleTimeString();
+                    nuevoItem.innerHTML = (data.isContingency ? '<span style="color:orange">⚠️ [Buffer]</span> ' : '') + "<strong>" + data.ticket + "</strong> - Llamado a las: " + data.hora;
                     lista.insertBefore(nuevoItem, lista.firstChild);
-                    if(lista.children.length > 5) lista.removeChild(lista.lastChild);
                 });
 
-                // Escuchar rechazos de seguridad del RBAC
-                socket.on('rbac-error', (msg) => {
-                    const errorBox = document.getElementById('error-box');
-                    errorBox.innerText = "❌ " + msg;
-                    errorBox.style.display = 'block';
+                socket.on('modo-contingencia-activo', () => {
+                    const banner = document.getElementById('banner');
+                    banner.innerText = "ESTADO RED: CONTINGENCIA (Guardando en MongoDB)";
+                    banner.className = "status-banner failover";
+                });
+
+                socket.on('contingencia-resuelta', () => {
+                    alert("🔄 ¡PostgreSQL Maestro recuperado! Clúster sincronizado.");
+                    window.location.reload();
                 });
 
                 function simularLlamado() {
-                    document.getElementById('error-box').style.display = 'none';
                     const numeroRandom = Math.floor(Math.random() * 900) + 100;
-                    
-                    // Enviamos la petición inyectando las credenciales simuladas de OAuth2
-                    socket.emit('medico-llama', { 
-                        ticket: "Ticket B-" + numeroRandom,
-                        token: miTokenSimulado 
-                    });
+                    socket.emit('medico-llama', { ticket: "Ticket B-" + numeroRandom, token: miTokenSimulado });
                 }
             </script>
         </body>
@@ -155,46 +173,24 @@ app.get('/', async (req, res) => {
     `);
 });
 
-// Canal de WebSockets con middleware de Validación de Roles (RBAC)
 io.on('connection', (socket) => {
     socket.on('medico-llama', async (data) => {
-        const usuarioRol = data.token ? data.token.role : 'Anónimo';
-        console.log(`🔒 [RBAC] Evaluando permisos para el rol: ${usuarioRol}`);
-
-        // VALIDACIÓN ESTRICTA DE ROL (RBAC)
-        if (usuarioRol !== 'Médico') {
-            const mensajeError = `Acceso Denegado: El rol '${usuarioRol}' no tiene permisos de escritura en el Módulo de Tickets.`;
-            console.error(`🚨 ALERT: ${mensajeError}`);
-
-            // 1. Notificar el bloqueo al infractor por el WebSocket
-            socket.emit('rbac-error', mensajeError);
-
-            // 2. AUDITORÍA CRÍTICA: Guardar la brecha de seguridad en MongoDB (db-logs)
+        const horaExactaServidor = new Date().toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        try {
+            // Intentamos escribir en Postgres
+            await pool.query('INSERT INTO historial_tickets (ticket_codigo) VALUES ($1)', [data.ticket]);
+            io.emit('nuevo-paciente', { ticket: data.ticket, isContingency: false, hora: horaExactaServidor });
+        } catch (err) {
+            console.log('🚨 Fallo transaccional directo detectado. Derivando de emergencia a MongoDB...');
             if (mongoDb) {
                 try {
-                    await mongoDb.collection('logs_auditoria_seguridad').insertOne({
-                        timestamp: new Date(),
-                        evento: 'ACCESO_RECHAZADO_RBAC',
-                        usuario: data.token ? data.token.user : 'Desconocido',
-                        rol_intentado: usuarioRol,
-                        modulo_afectado: 'Tickets y Llamados',
-                        descripcion: 'Intento no autorizado de manipulación de colas de atención'
-                    });
-                    console.log('💾 Alerta de seguridad registrada con éxito en MongoDB NoSQL.');
+                    await mongoDb.collection('cola_contingencia').insertOne({ ticket_codigo: data.ticket, fecha_llamado: new Date() });
+                    io.emit('modo-contingencia-activo');
+                    io.emit('nuevo-paciente', { ticket: data.ticket, isContingency: true, hora: horaExactaServidor });
                 } catch (mongoErr) {
-                    console.error('Error al escribir auditoría en Mongo:', mongoErr);
+                    console.error('Colapso de persistencia total', mongoErr);
                 }
             }
-            return; // Detiene la ejecución, bloqueando la escritura en Postgres
-        }
-
-        // Si es Médico, el flujo continúa normalmente
-        try {
-            await pool.query('INSERT INTO historial_tickets (ticket_codigo) VALUES ($1)', [data.ticket]);
-            console.log('Explicit entry saved to PostgreSQL (Master).');
-            io.emit('nuevo-paciente', data);
-        } catch (err) {
-            console.error('Error en Postgres:', err);
         }
     });
 });
