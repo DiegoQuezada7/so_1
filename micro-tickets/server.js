@@ -90,7 +90,7 @@ app.get('/', async (req, res) => {
     let estadoMaestro = 'ONLINE';
     
     try {
-        // SOLUCIÓN CLAVE: to_char extrae la hora exacta formateada desde la BD como texto puro sin sufrir alteraciones de huso horario
+        // to_char extrae la hora exacta formateada desde la BD como texto puro sin sufrir alteraciones de huso horario
         const result = await pool.query("SELECT ticket_codigo, to_char(fecha_llamado, 'HH24:MI:SS') as hora_limpia FROM historial_tickets ORDER BY id DESC LIMIT 5");
         historialHTML = result.rows.length === 0 
             ? '<li>No hay registros en la base de datos todavía.</li>' 
@@ -105,7 +105,6 @@ app.get('/', async (req, res) => {
                 historialHTML = buffer.length === 0 
                     ? '<li>Sin tickets nuevos en contingencia.</li>'
                     : buffer.map(t => {
-                        // SOLUCIÓN CLAVE: Forzar explícitamente la zona horaria de Chile al leer de Mongo
                         const horaMongo = new Date(t.fecha_llamado).toLocaleTimeString('es-CL', { timeZone: 'America/Santiago', hour: '2-digit', minute: '2-digit', second: '2-digit' });
                         return `<li><span style="color:orange">⚠️ [Buffer]</span> <strong>${t.ticket_codigo}</strong> - Llamado a las: ${horaMongo}</li>`;
                       }).join('');
@@ -210,7 +209,6 @@ app.get('/', async (req, res) => {
 // Procesamiento de eventos en tiempo real con zona horaria chilena estricta
 io.on('connection', (socket) => {
     socket.on('medico-llama', async (data) => {
-        // SOLUCIÓN CLAVE: Forzar zona horaria de Santiago para el evento en tiempo real
         const horaExactaServidor = new Date().toLocaleTimeString('es-CL', { timeZone: 'America/Santiago', hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const usuarioRol = data.token ? data.token.role : 'Anónimo';
 
