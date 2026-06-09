@@ -14,24 +14,24 @@ const mongoUrl = process.env.MONGO_URL || 'mongodb://db-logs:27017';
 const dbName = 'laboratorio_db';
 let db;
 
-// Bucle de reintento para MongoDB (Evita fallos si la BD tarda en arrancar)
+// Bucle para conectar MongoDB (si tarda en arrancar, reintenta)
 const conectarMongo = async () => {
     let conectado = false;
     while (!conectado) {
         try {
             const client = await MongoClient.connect(mongoUrl);
             db = client.db(dbName);
-            console.log('✅ Conexión con MongoDB NoSQL (Logs de Auditoría) exitosa.');
+            console.log('[OK] MongoDB conectado (logs de auditoria).');
             conectado = true;
         } catch (err) {
-            console.log('⏳ MongoDB aún se está inicializando... Reintentando conexión en 3 segundos.');
+            console.log('[WAIT] MongoDB arrancando, reintentando en 3s...');
             await new Promise(resolve => setTimeout(resolve, 3000));
         }
     }
 };
 conectarMongo();
 
-// Interfaz gráfica embebida para simular la Maquinaria IoT
+// Interfaz para simular la maquinaria IoT
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
@@ -114,14 +114,14 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Capturar eventos de WebSocket del dispositivo IoT
+// capturar datos del websocket del dispositivo IoT
 io.on('connection', (socket) => {
     console.log('Nuevo dispositivo o pantalla de laboratorio acoplada: ' + socket.id);
 
     socket.on('envio-telemetria', async (data) => {
-        console.log('📥 Datos de telemetría IoT recibidos en el servidor:', data);
+        console.log('[RECV] Datos de telemetria IoT recibidos:', data);
 
-        // PERSISTENCIA EN BASE DE DATOS NOSQL (MongoDB)
+        // guardar en MongoDB
         if (db) {
             try {
                 const colecciónLogs = db.collection('logs_muestras_lab');
@@ -129,9 +129,9 @@ io.on('connection', (socket) => {
                     ...data,
                     fecha_auditoria_sistema: new Date()
                 });
-                console.log('💾 Log telemétrico guardado exitosamente en MongoDB (Colección NoSQL).');
+                console.log('[SAVE] Log telemetrico guardado en MongoDB.');
             } catch (err) {
-                console.error('❌ Error al escribir log en MongoDB:', err);
+                console.error('[ERR] No se pudo escribir log en MongoDB:', err);
             }
         }
     });

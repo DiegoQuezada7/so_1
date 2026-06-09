@@ -18,12 +18,12 @@ const pool = new Pool({
     connectionTimeoutMillis: 2000
 });
 
-// Evita que Node muera si Postgres se apaga abruptamente
+// por si postgres se cae, node no muere
 pool.on('error', (err) => {
-    console.log('⚠️ [PostgreSQL Pool] Conexión de fondo interrumpida (Maestro inactivo).');
+    console.log('[WARN] Pool de PostgreSQL se cortó (el maestro no responde).');
 });
 
-// 2. Configuración MongoDB (Auditoría, Seguridad y Contingencia)
+// 2. Config MongoDB para logs y respaldo
 const mongoUrl = process.env.MONGO_URL || 'mongodb://db-logs:27017';
 let mongoDb;
 
@@ -33,10 +33,10 @@ const inicializarBasesDatos = async () => {
         try {
             const client = await MongoClient.connect(mongoUrl);
             mongoDb = client.db('laboratorio_db');
-            console.log('✅ [MongoDB] Conectado para auditoría y contingencia.');
+            console.log('[OK] MongoDB conectado (auditoria y respaldo).');
             mongoConectado = true;
         } catch (err) {
-            console.log('⏳ [MongoDB] Reintentando conexión en 3s...');
+            console.log('[WAIT] MongoDB no listo, reintentando en 3s...');
             await new Promise(res => setTimeout(res, 3000));
         }
     }
@@ -51,17 +51,17 @@ const inicializarBasesDatos = async () => {
                     fecha_llamado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             `);
-            console.log('✅ [PostgreSQL] Tabla de historial verificada.');
+            console.log('[OK] Tabla de historial verificada en PostgreSQL.');
             pgConectado = true;
         } catch (err) {
-            console.log('⏳ [PostgreSQL] Buscando Maestro... reintentando en 3s.');
+            console.log('[WAIT] Buscando maestro PostgreSQL, reintentando en 3s...');
             await new Promise(res => setTimeout(res, 3000));
         }
     }
 };
 inicializarBasesDatos();
 
-// WORKER AUTOMÁTICO: Sincronizador de Contingencia (Cada 5 segundos)
+// WORKER: cada 5s intenta pasar los datos de mongo a postgres
 setInterval(async () => {
     if (!mongoDb) return;
     try {
@@ -76,7 +76,7 @@ setInterval(async () => {
                     [ticketDoc.ticket_codigo, ticketDoc.fecha_llamado]);
                 await colaContingencia.deleteOne({ _id: ticketDoc._id });
             }
-            console.log('✅ [Worker] Datos de contingencia sincronizados en el Maestro.');
+            console.log('[OK] Datos de respaldo sincronizados al maestro.');
             io.emit('contingencia-resuelta');
         }
     } catch (err) {
@@ -106,7 +106,7 @@ app.get('/', async (req, res) => {
                     ? '<li>Sin tickets nuevos en contingencia.</li>'
                     : buffer.map(t => {
                         const horaMongo = new Date(t.fecha_llamado).toLocaleTimeString('es-CL', { timeZone: 'America/Santiago', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                        return `<li><span style="color:orange">⚠️ [Buffer]</span> <strong>${t.ticket_codigo}</strong> - Llamado a las: ${horaMongo}</li>`;
+                        return `<li><span style="color:orange">[Buffer]</span> <strong>${t.ticket_codigo}</strong> - Llamado a las: ${horaMongo}</li>`;
                       }).join('');
             } catch (mErr) {
                 historialHTML = '<li>Error total de persistencia.</li>';
@@ -174,13 +174,13 @@ app.get('/', async (req, res) => {
                     const lista = document.getElementById('lista-historial');
                     if (lista.innerText.includes("No hay registros") || lista.innerText.includes("Sin tickets") || lista.innerText.includes("Estructurando")) lista.innerHTML = "";
                     const nuevoItem = document.createElement('li');
-                    nuevoItem.innerHTML = (data.isContingency ? '<span style="color:orange">⚠️ [Buffer]</span> ' : '') + "<strong>" + data.ticket + "</strong> - Llamado a las: " + data.hora;
+                    nuevoItem.innerHTML = (data.isContingency ? '<span style="color:orange">[Buffer]</span> ' : '') + "<strong>" + data.ticket + "</strong> - Llamado a las: " + data.hora;
                     lista.insertBefore(nuevoItem, lista.firstChild);
                 });
 
                 socket.on('rbac-error', (msg) => {
                     const errorBox = document.getElementById('error-box');
-                    errorBox.innerText = "❌ " + msg;
+                    errorBox.innerText = "[ERR] " + msg;
                     errorBox.style.display = 'block';
                 });
 
@@ -191,7 +191,7 @@ app.get('/', async (req, res) => {
                 });
 
                 socket.on('contingencia-resuelta', () => {
-                    alert("🔄 ¡PostgreSQL Maestro recuperado! El clúster se ha sincronizado.");
+                    alert("[SYNC] PostgreSQL Maestro recuperado. El cluster se ha sincronizado.");
                     window.location.reload();
                 });
 
@@ -212,7 +212,7 @@ io.on('connection', (socket) => {
         const horaExactaServidor = new Date().toLocaleTimeString('es-CL', { timeZone: 'America/Santiago', hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const usuarioRol = data.token ? data.token.role : 'Anónimo';
 
-        // Filtro de Seguridad RBAC
+        // Filtro RBAC (control de acceso por rol)
         if (usuarioRol !== 'Médico') {
             const mensajeError = `Acceso Denegado: El rol '${usuarioRol}' no tiene permisos en este módulo.`;
             socket.emit('rbac-error', mensajeError);
@@ -238,7 +238,7 @@ io.on('connection', (socket) => {
             await pool.query('INSERT INTO historial_tickets (ticket_codigo) VALUES ($1)', [data.ticket]);
             io.emit('nuevo-paciente', { ticket: data.ticket, isContingency: false, hora: horaExactaServidor });
         } catch (err) {
-            console.log('🚨 PostgreSQL Maestro inactivo. Derivando de emergencia a MongoDB...');
+            console.log('[ALERT] PostgreSQL Maestro caido. Guardando en MongoDB...');
             if (mongoDb) {
                 try {
                     await mongoDb.collection('cola_contingencia').insertOne({ ticket_codigo: data.ticket, fecha_llamado: new Date() });
